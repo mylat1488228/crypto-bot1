@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import random
 import os
+import requests # НУЖНО ДЛЯ ТОЧНЫХ КУРСОВ
 from datetime import datetime
 
 # --- КОНФИГУРАЦИЯ ---
@@ -23,15 +24,59 @@ MAIN_ADMIN_ID = 7031015199
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- ВАЛЮТЫ ---
-# Исправлено: USD теперь имеет код 'USD_BASE', чтобы бот считал его как 1 к 1
-TICKERS = {
-    '💵 USDT': 'USDT-USD', '🇺🇸 USD': 'USD_BASE', '₿ BTC': 'BTC-USD',
-    '💎 ETH': 'ETH-USD', '💎 TON': 'TON11419-USD', '🇪🇺 EUR': 'EURUSD=X',
-    '🇷🇺 RUB': 'RUB=X', '🇰🇬 KGS': 'KGS=X', '🇨🇳 CNY': 'CNY=X',
-    '🇦🇪 AED': 'AED=X', '🇹🇯 TJS': 'TJS=X', '🇺🇿 UZS': 'UZS=X'
+# --- СПИСКИ ВАЛЮТ (Для меню) ---
+CURRENCIES = {
+    '💵 USDT': 'USDT', '🇺🇸 USD': 'USD', '₿ BTC': 'BTC',
+    '💎 ETH': 'ETH', '💎 TON': 'TON', '🇪🇺 EUR': 'EUR',
+    '🇷🇺 RUB': 'RUB', '🇰🇬 KGS': 'KGS', '🇨🇳 CNY': 'CNY',
+    '🇦🇪 AED': 'AED', '🇹🇯 TJS': 'TJS', '🇺🇿 UZS': 'UZS'
 }
-REVERSE_PAIRS = ['RUB=X', 'KGS=X', 'CNY=X', 'AED=X', 'TJS=X', 'UZS=X']
+
+# --- КЭШ КУРСОВ (ЧТОБЫ БОТ РАБОТАЛ БЫСТРО) ---
+# Храним курсы относительно USD (1 USD = X валюты)
+rates_cache = {}
+last_update = 0
+
+def update_rates():
+    """Обновляет курсы валют с точных API"""
+    global rates_cache, last_update
+    
+    # Не обновляем чаще чем раз в 10 минут
+    if time.time() - last_update < 600 and rates_cache:
+        return
+
+    print("🔄 Обновляю курсы валют...")
+    new_rates = {'USD': 1.0, 'USDT': 1.0} # USDT считаем равным USD для простоты
+    
+    try:
+        # 1. ФИАТНЫЕ ВАЛЮТЫ (Open Exchange Rates)
+        resp = requests.get("https://open.er-api.com/v6/latest/USD").json()
+        if 'rates' in resp:
+            for code in ['RUB', 'KGS', 'CNY', 'AED', 'TJS', 'UZS', 'EUR']:
+                if code in resp['rates']:
+                    new_rates[code] = resp['rates'][code]
+    except Exception as e:
+        print(f"Ошибка Фиат API: {e}")
+
+    try:
+        # 2. КРИПТОВАЛЮТЫ (CoinGecko)
+        # Получаем цену в USD
+        cg_ids = "bitcoin,ethereum,the-open-network"
+        resp = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg_ids}&vs_currencies=usd").json()
+        
+        # CoinGecko дает цену 1 монеты в долларах. Нам нужно наоборот (сколько монет в 1 долларе),
+        # либо мы будем использовать логику кросс-курса.
+        # Для удобства сохраним прямую цену в долларах, а в конвертере учтем это.
+        if 'bitcoin' in resp: new_rates['BTC_PRICE'] = resp['bitcoin']['usd']
+        if 'ethereum' in resp: new_rates['ETH_PRICE'] = resp['ethereum']['usd']
+        if 'the-open-network' in resp: new_rates['TON_PRICE'] = resp['the-open-network']['usd']
+        
+    except Exception as e:
+        print(f"Ошибка Крипто API: {e}")
+
+    rates_cache = new_rates
+    last_update = time.time()
+    print("✅ Курсы обновлены")
 
 # --- БАЗА ДАННЫХ ---
 DB_NAME = "bot_data.db"
@@ -76,16 +121,10 @@ init_db()
 def safe_float(text):
     try:
         if not text: return 0.0
-        clean_text = text.replace(',', '.').replace(' ', '')
+        clean_text = text.replace(',', '.').replace(' ', '').replace("'", "")
         return float(clean_text)
     except:
         return None
-
-def get_currency_name(ticker_code):
-    for name, code in TICKERS.items():
-        if code == ticker_code:
-            return name.split()[1] 
-    return "ед."
 
 def log_action(uid, username, action):
     t = datetime.now().strftime("%d.%m %H:%M")
@@ -115,40 +154,49 @@ def update_data(uid, key, value):
 def clear_state(uid):
     if uid in user_states: del user_states[uid]
 
-def get_price(ticker):
-    # Если это Доллар США, цена всегда 1.0
-    if ticker == 'USD_BASE': return 1.0
+# --- ЛОГИКА КОНВЕРТАЦИИ ---
+def convert_currency(amount, from_cur, to_cur):
+    update_rates() # Проверяем актуальность
     
-    try:
-        d = yf.Ticker(ticker)
-        return d.history(period='2d')['Close'].iloc[-1]
-    except: return None
+    # 1. Приводим исходную валюту к USD
+    usd_amount = 0.0
+    
+    # Если исходная - Крипта (у нее цена записана как "сколько стоит 1 монета")
+    if from_cur == 'BTC': usd_amount = amount * rates_cache.get('BTC_PRICE', 0)
+    elif from_cur == 'ETH': usd_amount = amount * rates_cache.get('ETH_PRICE', 0)
+    elif from_cur == 'TON': usd_amount = amount * rates_cache.get('TON_PRICE', 0)
+    # Если исходная - Фиат/Стейбл (цена записана как "сколько в 1 долларе")
+    else:
+        rate = rates_cache.get(from_cur, 0)
+        if rate == 0: return 0
+        usd_amount = amount / rate
 
-def convert(amount, ticker, price, to_usd=True):
-    # Если цена не найдена (например ошибка сети), возвращаем 0
-    if price is None: return 0
+    # 2. Переводим USD в целевую валюту
+    final_amount = 0.0
     
-    if ticker == 'USD_BASE': return amount
-    
-    if ticker in REVERSE_PAIRS:
-        return amount / price if to_usd else amount * price
-    return amount * price if to_usd else amount / price
+    if to_cur == 'BTC': final_amount = usd_amount / rates_cache.get('BTC_PRICE', 1)
+    elif to_cur == 'ETH': final_amount = usd_amount / rates_cache.get('ETH_PRICE', 1)
+    elif to_cur == 'TON': final_amount = usd_amount / rates_cache.get('TON_PRICE', 1)
+    else:
+        rate = rates_cache.get(to_cur, 0)
+        final_amount = usd_amount * rate
+        
+    return final_amount
 
 # --- ТЕКСТЫ ОБУЧЕНИЯ ---
 def send_tutorial(uid):
     text = (
         "👋 **Добро пожаловать! Я твой Финансовый Ассистент.**\n\n"
-        "Вот подробная инструкция:\n\n"
+        "📜 **Инструкция:**\n\n"
         "🧮 **Калькулятор**\n"
-        "Обычный обменник. Вводишь сумму и комиссию, я считаю итог на руки.\n\n"
-        "🔀 **Тройной Обмен (Арбитраж)**\n"
-        "Для связок (например USDT -> KGS -> RUB).\n\n"
+        "Считает обмен валют по РЕАЛЬНОМУ курсу биржи. Учитывает комиссию.\n"
+        "Пример: Отдаю 100 USDT -> Получаю RUB (комиссия 1%).\n\n"
+        "🔀 **Тройной Обмен**\n"
+        "Считает цепочки арбитража. Например: USDT -> KGS -> RUB.\n\n"
         "➕ **Отчет (Проекты)**\n"
-        "Сдавай отчеты по работе. Я посчитаю чистую прибыль, ROI и Маржу.\n\n"
-        "📈 **Графики**\n"
-        "История цен валют. Можно добавить в 'Мой список'.\n\n"
+        "Вноси доходы и расходы. Я посчитаю чистую прибыль, ROI и Маржу.\n\n"
         "💬 **AI Советник**\n"
-        "Спроси 'Что купить?', и я дам совет на основе рынка."
+        "Анализирует рынок и подсказывает, что сейчас выгодно купить/продать."
     )
     bot.send_message(uid, text, parse_mode="Markdown")
 
@@ -169,8 +217,8 @@ def main_menu(uid):
 def tickers_kb(prefix):
     markup = types.InlineKeyboardMarkup(row_width=2)
     btns = []
-    for name, t in TICKERS.items():
-        btns.append(types.InlineKeyboardButton(name, callback_data=f"{prefix}_{t}"))
+    for name, code in CURRENCIES.items():
+        btns.append(types.InlineKeyboardButton(name, callback_data=f"{prefix}_{code}"))
     markup.add(*btns)
     return markup
 
@@ -193,13 +241,14 @@ def start(message):
         db.commit()
     
     log_action(uid, uname, "Start")
+    update_rates() # Подгружаем курсы сразу при старте
     
     if is_new:
         send_tutorial(uid)
         time.sleep(2)
         bot.send_message(uid, "Готов к работе!", reply_markup=main_menu(uid))
     else:
-        bot.send_message(uid, f"С возвращением! Работаем.", reply_markup=main_menu(uid))
+        bot.send_message(uid, f"С возвращением!", reply_markup=main_menu(uid))
 
 @bot.message_handler(func=lambda m: m.text == "❓ Помощь / Инструкция")
 def help_btn(message):
@@ -224,8 +273,7 @@ def proj_name(message):
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'proj_type')
 def proj_type(message):
-    if message.text not in ["Карта", "Сим", "Проект", "Другое"]:
-        return bot.send_message(message.chat.id, "Используйте кнопки!")
+    if message.text not in ["Карта", "Сим", "Проект", "Другое"]: return bot.send_message(message.chat.id, "Кнопкой!")
     update_data(message.chat.id, 'type', message.text)
     bot.send_message(message.chat.id, "Лимит расходов (число, или 0):", reply_markup=types.ReplyKeyboardRemove())
     set_state(message.chat.id, 'proj_limit')
@@ -237,8 +285,7 @@ def proj_finish(message):
     
     data = user_states[message.chat.id]['data']
     with sqlite3.connect(DB_NAME) as db:
-        db.execute("INSERT INTO projects (name, type, limit_exp) VALUES (?, ?, ?)", 
-                   (data['name'], data['type'], limit))
+        db.execute("INSERT INTO projects (name, type, limit_exp) VALUES (?, ?, ?)", (data['name'], data['type'], limit))
         db.commit()
     bot.send_message(message.chat.id, f"✅ Проект **{data['name']}** создан!", parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
     clear_state(message.chat.id)
@@ -251,14 +298,10 @@ def rep_start(message):
     clear_state(message.chat.id)
     with sqlite3.connect(DB_NAME) as db:
         projs = db.execute("SELECT id, name, type FROM projects WHERE active=1").fetchall()
-    
     if not projs: return bot.send_message(message.chat.id, "Нет активных проектов.")
-    
     markup = types.InlineKeyboardMarkup()
-    for p in projs: 
-        markup.add(types.InlineKeyboardButton(f"{p[1]} ({p[2]})", callback_data=f"rep_p_{p[0]}"))
-    
-    bot.send_message(message.chat.id, "Выберите проект для отчета:", reply_markup=markup)
+    for p in projs: markup.add(types.InlineKeyboardButton(f"{p[1]} ({p[2]})", callback_data=f"rep_p_{p[0]}"))
+    bot.send_message(message.chat.id, "Выберите проект:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rep_p_'))
 def rep_sel(call):
@@ -271,7 +314,7 @@ def rep_sel(call):
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'rep_turn')
 def rep_turn(message):
     val = safe_float(message.text)
-    if val is None: return bot.send_message(message.chat.id, "Введите число (можно с запятой)!")
+    if val is None: return bot.send_message(message.chat.id, "Введите число!")
     update_data(message.chat.id, 'turnover', val)
     bot.send_message(message.chat.id, "📦 Расход на **Материалы** (если нет - 0):", parse_mode="Markdown")
     set_state(message.chat.id, 'rep_mat')
@@ -306,31 +349,21 @@ def rep_finish(message):
     if extra is None: return bot.send_message(message.chat.id, "Введите число!")
     
     d = user_states[message.chat.id]['data']
-    
     turnover = d['turnover']
     total_expenses = d['mat'] + d['com'] + d['perc'] + extra
     net_profit = turnover - total_expenses
-    
     roi = (net_profit / total_expenses * 100) if total_expenses > 0 else 0
     margin = (net_profit / turnover * 100) if turnover > 0 else 0
     
     with sqlite3.connect(DB_NAME) as db:
-        db.execute("""
-            INSERT INTO reports 
-            (user_id, project_id, turnover, expenses, profit, roi, margin) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (message.chat.id, d['pid'], turnover, total_expenses, net_profit, roi, margin))
+        db.execute("""INSERT INTO reports (user_id, project_id, turnover, expenses, profit, roi, margin) VALUES (?, ?, ?, ?, ?, ?, ?)""", 
+                   (message.chat.id, d['pid'], turnover, total_expenses, net_profit, roi, margin))
         db.commit()
         
-    res = (
-        f"✅ **Отчет принят!**\n\n"
-        f"📂 **Проект:** {d['pname']}\n"
-        f"💰 **Оборот:** *{turnover:,.2f} ₽*\n"
-        f"💸 **Общие расходы:** *{total_expenses:,.2f} ₽*\n"
-        f"💵 **Чистая прибыль:** *{net_profit:,.2f} ₽*\n"
-        f"📈 **ROI:** *{roi:.1f}%*\n"
-        f"📊 **Маржа:** *{margin:.1f}%*"
-    )
+    res = (f"✅ **Отчет принят!**\n\n📂 **Проект:** {d['pname']}\n💰 **Оборот:** *{turnover:,.2f} ₽*\n"
+           f"💸 **Общие расходы:** *{total_expenses:,.2f} ₽*\n💵 **Чистая прибыль:** *{net_profit:,.2f} ₽*\n"
+           f"📈 **ROI:** *{roi:.1f}%*\n📊 **Маржа:** *{margin:.1f}%*")
+    
     bot.send_message(message.chat.id, res, parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
     clear_state(message.chat.id)
 
@@ -386,7 +419,7 @@ def adm_broadcast_send(message):
     clear_state(message.chat.id)
 
 # ===========================
-# 4. КАЛЬКУЛЯТОРЫ
+# 4. КАЛЬКУЛЯТОРЫ (ИСПРАВЛЕНЫ)
 # ===========================
 @bot.message_handler(func=lambda m: m.text == "🧮 Калькулятор")
 def calc_start(message):
@@ -420,17 +453,16 @@ def calc_5(message):
     if fee is None: return bot.send_message(message.chat.id, "Введите число!")
     
     d = user_states[message.chat.id]['data']
-    p1, p2 = get_price(d['c1']), get_price(d['c2'])
+    # КОНВЕРТАЦИЯ
+    result = convert_currency(d['amt'], d['c1'], d['c2'])
     
-    if p1 and p2:
-        u = convert(d['amt'], d['c1'], p1, True)
-        f = convert(u*(1-fee/100), d['c2'], p2, False)
-        c_name = get_currency_name(d['c2'])
-        bot.send_message(message.chat.id, f"✅ Итог: **{f:,.2f} {c_name}**", parse_mode="Markdown")
-    else:
-        bot.send_message(message.chat.id, "Ошибка курса.")
+    # ВЫЧИТАЕМ КОМИССИЮ (ИЗ РЕЗУЛЬТАТА)
+    final = result * (1 - fee/100)
+    
+    bot.send_message(message.chat.id, f"✅ Итог: **{final:,.2f} {d['c2']}**", parse_mode="Markdown")
     clear_state(message.chat.id)
 
+# ТРОЙНОЙ ОБМЕН
 @bot.message_handler(func=lambda m: m.text == "🔀 Тройной Обмен")
 def tr_start(message):
     clear_state(message.chat.id)
@@ -458,24 +490,29 @@ def tr_5(message):
     val = safe_float(message.text)
     if val is None: return bot.send_message(message.chat.id, "Число!")
     update_data(message.chat.id, 'amt', val)
-    bot.send_message(message.chat.id, "Комиссия %:")
+    bot.send_message(message.chat.id, "Комиссия на каждом шаге (%):")
     set_state(message.chat.id, 'tr_fee')
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'tr_fee')
 def tr_6(message):
     fee = safe_float(message.text)
     if fee is None: return bot.send_message(message.chat.id, "Число!")
-    fee = fee / 100
+    fee_factor = 1 - fee/100
     
     d = user_states[message.chat.id]['data']
-    p1, p2, p3 = get_price(d['t1']), get_price(d['t2']), get_price(d['t3'])
     
-    if p1 and p2 and p3:
-        u1 = convert(d['amt'], d['t1'], p1, True)
-        u2 = convert(convert(u1*(1-fee), d['t2'], p2, False), d['t2'], p2, True)
-        fin = convert(u2*(1-fee), d['t3'], p3, False)
-        c_name = get_currency_name(d['t3'])
-        bot.send_message(message.chat.id, f"✅ Итог: **{fin:,.2f} {c_name}**", parse_mode="Markdown")
+    # 1. Валюта А -> Валюта Б (с комиссией)
+    step1 = convert_currency(d['amt'], d['t1'], d['t2']) * fee_factor
+    
+    # 2. Валюта Б -> Валюта В (с комиссией)
+    step2 = convert_currency(step1, d['t2'], d['t3']) * fee_factor
+    
+    text = (f"🔄 **Арбитраж:**\n"
+            f"1. {d['amt']} {d['t1']} ➡️ {step1:,.2f} {d['t2']}\n"
+            f"2. {step1:,.2f} {d['t2']} ➡️ {step2:,.2f} {d['t3']}\n\n"
+            f"💰 **Итог:** **{step2:,.2f} {d['t3']}**")
+            
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
     clear_state(message.chat.id)
 
 # ГРАФИКИ
@@ -486,6 +523,13 @@ def charts(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('g_'))
 def chart_p(call):
     t = call.data.split('_')[1]
+    # Используем Yahoo код для графика, если он отличается
+    yf_ticker = f"{t}=X" if t in ['RUB','KGS','CNY','EUR'] else f"{t}-USD"
+    if t == 'USDT': yf_ticker = 'USDT-USD'
+    
+    # Кэшируем тикер для следующего шага
+    update_data(call.message.chat.id, 'chart_t', yf_ticker)
+    
     m = types.InlineKeyboardMarkup(row_width=2)
     m.add(types.InlineKeyboardButton("30д", callback_data=f"gp_{t}_30d"),
           types.InlineKeyboardButton("7д", callback_data=f"gp_{t}_7d"),
@@ -497,17 +541,26 @@ def chart_p(call):
 def chart_draw(call):
     _, t, p = call.data.split('_')
     bot.answer_callback_query(call.id, "Рисую...")
+    
+    # Получаем правильный тикер для YF
+    user_d = user_states.get(call.message.chat.id, {}).get('data', {})
+    yf_t = user_d.get('chart_t', f"{t}-USD")
+    
     per, inter = ('1mo', '1d') if p == '30d' else (('5d', '60m') if p == '7d' else ('1d', '30m'))
     try:
-        d = yf.Ticker(t).history(period=per, interval=inter)
+        d = yf.Ticker(yf_t).history(period=per, interval=inter)
         plt.figure()
         plt.plot(d.index, d['Close'])
+        plt.title(f"{t} ({p})")
+        plt.grid(True)
         buf = io.BytesIO()
         plt.savefig(buf, format='png')
         buf.seek(0)
         bot.send_photo(call.message.chat.id, buf)
         plt.close()
-    except: pass
+    except Exception as e: 
+        print(e)
+        bot.send_message(call.message.chat.id, "График недоступен для этой пары.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('fav_'))
 def fav_add(call):
@@ -522,11 +575,16 @@ def watchlist(message):
     with sqlite3.connect(DB_NAME) as db:
         wl = db.execute("SELECT ticker FROM watchlist WHERE user_id = ?", (message.chat.id,)).fetchall()
     if not wl: return bot.send_message(message.chat.id, "Пусто.")
-    t = "⭐ Курсы:\n"
+    t = "⭐ **Курсы (USD):**\n"
+    update_rates()
     for row in wl:
-        p = get_price(row[0])
-        t += f"{row[0]}: {p:.4f}\n" if p else f"{row[0]}: Err\n"
-    bot.send_message(message.chat.id, t)
+        cur = row[0]
+        # Для крипты - цена, для фиата - курс
+        if cur in ['BTC','ETH','TON']: rate = rates_cache.get(f"{cur}_PRICE", 0)
+        else: rate = rates_cache.get(cur, 0)
+        
+        t += f"{cur}: {rate:.4f}\n"
+    bot.send_message(message.chat.id, t, parse_mode="Markdown")
 
 # AI
 @bot.message_handler(func=lambda m: m.text == "💬 AI Советник")
@@ -545,16 +603,19 @@ def ai_logic(message):
     if "купить" in message.text.lower() or "продать" in message.text.lower():
         bot.send_message(message.chat.id, "⏳ Анализирую RSI...")
         best, rsi = "USDT", 50
-        for n, t in TICKERS.items():
+        for name, code in CURRENCIES.items():
+            if code in ['USD', 'USDT']: continue # Не анализируем стейблы
             try:
-                d = yf.Ticker(t).history(period='1mo')
+                # Для анализа все равно нужен yfinance (история)
+                yf_code = f"{code}-USD" if code not in ['RUB','KGS','CNY'] else f"{code}=X"
+                d = yf.Ticker(yf_code).history(period='1mo')
                 if len(d) > 14:
                     delta = d['Close'].diff()
-                    u, d = delta.clip(lower=0), -1*delta.clip(upper=0)
-                    rs = u.ewm(com=13, adjust=False).mean() / d.ewm(com=13, adjust=False).mean()
+                    u, d_ = delta.clip(lower=0), -1*delta.clip(upper=0)
+                    rs = u.ewm(com=13, adjust=False).mean() / d_.ewm(com=13, adjust=False).mean()
                     val = 100 - (100/(1+rs)).iloc[-1]
-                    if message.text == "Что купить?" and val < 40: best, rsi = n, val; break
-                    if message.text == "Что продать?" and val > 60: best, rsi = n, val; break
+                    if message.text == "Что купить?" and val < 40: best, rsi = name, val; break
+                    if message.text == "Что продать?" and val > 60: best, rsi = name, val; break
             except: continue
         bot.send_message(message.chat.id, f"Совет: {best} (RSI: {rsi:.1f})")
     else:
