@@ -2,7 +2,7 @@ import telebot
 from telebot import types
 import yfinance as yf
 import matplotlib
-matplotlib.use('Agg') # Фикс для сервера
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import threading
@@ -12,13 +12,15 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import random
-import os  # <--- Добавил для работы с Railway
+import os
 from datetime import datetime
 
 # --- КОНФИГУРАЦИЯ ---
-# Бот сначала ищет токен в настройках Railway. Если там пусто, берет этот жесткий токен:
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAFdctXociA1FcnaxKW7N0wbfc6SdFbJ1v0')
-MAIN_ADMIN = 'Slavyanln' 
+
+# ВСТАВЬ СЮДА СВОЙ ЦИФРОВОЙ ID (ЧИСЛО, БЕЗ КАВЫЧЕК)
+# Узнать ID можно у бота @userinfobot
+MAIN_ADMIN_ID = 7031015199
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -31,20 +33,17 @@ TICKERS = {
 }
 REVERSE_PAIRS = ['RUB=X', 'KGS=X', 'CNY=X', 'AED=X', 'TJS=X', 'UZS=X']
 
-# --- СОСТОЯНИЯ И ПАМЯТЬ ---
+# --- БАЗА ДАННЫХ ---
 DB_NAME = "bot_data.db"
 user_states = {} 
 
-# --- БАЗА ДАННЫХ ---
 def init_db():
     with sqlite3.connect(DB_NAME) as db:
-        # Таблица пользователей
         db.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             role TEXT DEFAULT 'executor'
         )''')
-        # Проекты
         db.execute('''CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -52,7 +51,6 @@ def init_db():
             limit_exp REAL,
             active INTEGER DEFAULT 1
         )''')
-        # Отчеты
         db.execute('''CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -63,7 +61,6 @@ def init_db():
             roi REAL,
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
-        # Избранное
         db.execute('''CREATE TABLE IF NOT EXISTS watchlist (
             user_id INTEGER,
             ticker TEXT,
@@ -73,8 +70,11 @@ def init_db():
 
 init_db()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ---
 def get_user_role(uid):
+    # Если ID совпадает с главным админом - всегда возвращаем 'admin'
+    if uid == MAIN_ADMIN_ID: return 'admin'
+    
     with sqlite3.connect(DB_NAME) as db:
         res = db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)).fetchone()
         return res[0] if res else 'executor'
@@ -126,20 +126,29 @@ def tickers_kb(prefix):
 def start(message):
     uid = message.chat.id
     uname = message.from_user.username
-    role = 'admin' if uname == MAIN_ADMIN else 'executor'
+    
+    # Автоматически определяем роль
+    role = 'admin' if uid == MAIN_ADMIN_ID else 'executor'
     
     with sqlite3.connect(DB_NAME) as db:
         db.execute("INSERT OR IGNORE INTO users (user_id, username, role) VALUES (?, ?, ?)", (uid, uname, role))
-        if uname == MAIN_ADMIN:
+        if role == 'admin':
             db.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (uid,))
         db.commit()
     
-    bot.send_message(uid, f"Привет! Я готов. Твоя роль: {role}", reply_markup=main_menu(uid))
+    bot.send_message(uid, f"Привет! Твой ID: {uid}\nРоль: {role}", reply_markup=main_menu(uid))
 
-# --- АДМИН КОНСОЛЬ (/admin) ---
+# --- ОТЛАДКА (ЕСЛИ ЧТО-ТО НЕ РАБОТАЕТ) ---
+@bot.message_handler(commands=['me'])
+def my_info(message):
+    bot.send_message(message.chat.id, f"Твой ID: `{message.chat.id}`\nНик: @{message.from_user.username}", parse_mode="Markdown")
+
+# --- АДМИН КОНСОЛЬ ---
 @bot.message_handler(commands=['admin'])
 def admin_cmd(message):
-    if message.from_user.username != MAIN_ADMIN: return
+    if message.chat.id != MAIN_ADMIN_ID: 
+        return bot.send_message(message.chat.id, "⛔ Доступ запрещен. Проверь свой ID.")
+    
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("👥 Пользователи", callback_data="adm_users"))
     bot.send_message(message.chat.id, "🔒 Админ Панель", reply_markup=markup)
@@ -147,8 +156,8 @@ def admin_cmd(message):
 @bot.callback_query_handler(func=lambda call: call.data == "adm_users")
 def adm_users(call):
     with sqlite3.connect(DB_NAME) as db:
-        users = db.execute("SELECT username, role FROM users").fetchall()
-    text = "👥 Список:\n" + "\n".join([f"@{u[0]} - {u[1]}" for u in users])
+        users = db.execute("SELECT username, user_id, role FROM users").fetchall()
+    text = "👥 Список:\n" + "\n".join([f"ID: {u[1]} | @{u[0]} | {u[2]}" for u in users])
     bot.send_message(call.message.chat.id, text[:4000])
 
 # ===========================
@@ -188,13 +197,12 @@ def proj_finish(message):
     except: bot.send_message(message.chat.id, "Нужно число!")
 
 # ===========================
-# 2. ОТЧЕТЫ (ИСПОЛНИТЕЛИ)
+# 2. ОТЧЕТЫ
 # ===========================
 @bot.message_handler(func=lambda m: m.text == "➕ Отчет (Проекты)")
 def rep_start(message):
     with sqlite3.connect(DB_NAME) as db:
         projs = db.execute("SELECT id, name FROM projects WHERE active=1").fetchall()
-    
     if not projs: return bot.send_message(message.chat.id, "Нет проектов.")
     
     markup = types.InlineKeyboardMarkup()
@@ -228,8 +236,7 @@ def rep_fin(message):
             db.execute("INSERT INTO reports (user_id, project_id, turnover, expenses, profit, roi) VALUES (?,?,?,?,?,?)",
                        (message.chat.id, d['pid'], d['turn'], exp, profit, roi))
             db.commit()
-            
-        bot.send_message(message.chat.id, f"✅ Отчет принят!\nПрибыль: {profit:,.2f}", reply_markup=main_menu(message.chat.id))
+        bot.send_message(message.chat.id, f"✅ Принято! Профит: {profit}", reply_markup=main_menu(message.chat.id))
         clear_state(message.chat.id)
     except: bot.send_message(message.chat.id, "Число!")
 
@@ -406,13 +413,6 @@ def ai_logic(message):
         bot.send_message(message.chat.id, "Я понимаю кнопки.")
 
 # ФОНОВЫЕ ЗАДАЧИ
-def job():
-    with sqlite3.connect(DB_NAME) as db:
-        users = db.execute("SELECT user_id FROM users").fetchall()
-        # тут можно добавить проверку цен
-    pass
-schedule.every(10).minutes.do(job)
-
 def run_bg():
     while True:
         schedule.run_pending()
