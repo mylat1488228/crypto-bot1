@@ -12,11 +12,13 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import random
+import os  # <--- Добавил для работы с Railway
 from datetime import datetime
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = '8212929038:AAFdctXociA1FcnaxKW7N0wbfc6SdFbJ1v0'
-MAIN_ADMIN = 'SIavyanln' # Твой ник
+# Бот сначала ищет токен в настройках Railway. Если там пусто, берет этот жесткий токен:
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAFdctXociA1FcnaxKW7N0wbfc6SdFbJ1v0')
+MAIN_ADMIN = 'SIavyanln' 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -30,13 +32,8 @@ TICKERS = {
 REVERSE_PAIRS = ['RUB=X', 'KGS=X', 'CNY=X', 'AED=X', 'TJS=X', 'UZS=X']
 
 # --- СОСТОЯНИЯ И ПАМЯТЬ ---
-# SQLite требует файл, но на Railway он сбрасывается при перезагрузке.
-# Если нужно вечное хранение, нужен PostgreSQL, но пока делаем SQLite в файле.
 DB_NAME = "bot_data.db"
-
-# Хранилище состояний для диалогов (кто на каком шаге)
 user_states = {} 
-# user_states[uid] = {'step': 'name', 'data': {...}}
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -74,7 +71,7 @@ def init_db():
         )''')
         db.commit()
 
-init_db() # Запуск при старте
+init_db()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_user_role(uid):
@@ -133,7 +130,6 @@ def start(message):
     
     with sqlite3.connect(DB_NAME) as db:
         db.execute("INSERT OR IGNORE INTO users (user_id, username, role) VALUES (?, ?, ?)", (uid, uname, role))
-        # Если это ты, принудительно даем админку
         if uname == MAIN_ADMIN:
             db.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (uid,))
         db.commit()
@@ -413,9 +409,8 @@ def ai_logic(message):
 def job():
     with sqlite3.connect(DB_NAME) as db:
         users = db.execute("SELECT user_id FROM users").fetchall()
-        for u in users:
-            # тут можно добавить проверку цен
-            pass
+        # тут можно добавить проверку цен
+    pass
 schedule.every(10).minutes.do(job)
 
 def run_bg():
