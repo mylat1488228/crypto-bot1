@@ -19,13 +19,14 @@ from datetime import datetime
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAEJ_P_Ttiy8-nrf1W2KfOqxQDiJNY1MlGk')
 
 # !!! ВСТАВЬ СЮДА СВОЙ ЦИФРОВОЙ ID !!!
-MAIN_ADMIN_ID = 7031015199 
+MAIN_ADMIN_ID = 7031015199
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # --- ВАЛЮТЫ ---
+# Исправлено: USD теперь имеет код 'USD_BASE', чтобы бот считал его как 1 к 1
 TICKERS = {
-    '💵 USDT': 'USDT-USD', '🇺🇸 USD': 'DX-Y.NYB', '₿ BTC': 'BTC-USD',
+    '💵 USDT': 'USDT-USD', '🇺🇸 USD': 'USD_BASE', '₿ BTC': 'BTC-USD',
     '💎 ETH': 'ETH-USD', '💎 TON': 'TON11419-USD', '🇪🇺 EUR': 'EURUSD=X',
     '🇷🇺 RUB': 'RUB=X', '🇰🇬 KGS': 'KGS=X', '🇨🇳 CNY': 'CNY=X',
     '🇦🇪 AED': 'AED=X', '🇹🇯 TJS': 'TJS=X', '🇺🇿 UZS': 'UZS=X'
@@ -73,20 +74,16 @@ init_db()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def safe_float(text):
-    """Превращает любой текст (10,5 или 10.5 или 10 000) в число"""
     try:
         if not text: return 0.0
-        # Заменяем запятую на точку, убираем пробелы
         clean_text = text.replace(',', '.').replace(' ', '')
         return float(clean_text)
     except:
         return None
 
 def get_currency_name(ticker_code):
-    """Находит красивое имя валюты по коду"""
     for name, code in TICKERS.items():
         if code == ticker_code:
-            # Возвращает часть имени, например "USDT" из "💵 USDT"
             return name.split()[1] 
     return "ед."
 
@@ -119,12 +116,20 @@ def clear_state(uid):
     if uid in user_states: del user_states[uid]
 
 def get_price(ticker):
+    # Если это Доллар США, цена всегда 1.0
+    if ticker == 'USD_BASE': return 1.0
+    
     try:
         d = yf.Ticker(ticker)
         return d.history(period='2d')['Close'].iloc[-1]
     except: return None
 
 def convert(amount, ticker, price, to_usd=True):
+    # Если цена не найдена (например ошибка сети), возвращаем 0
+    if price is None: return 0
+    
+    if ticker == 'USD_BASE': return amount
+    
     if ticker in REVERSE_PAIRS:
         return amount / price if to_usd else amount * price
     return amount * price if to_usd else amount / price
@@ -177,14 +182,12 @@ def start(message):
     uname = message.from_user.username
     role = 'admin' if uid == MAIN_ADMIN_ID else 'executor'
     
-    # Проверка: Новый юзер или нет?
     is_new = False
     with sqlite3.connect(DB_NAME) as db:
         exists = db.execute("SELECT 1 FROM users WHERE user_id = ?", (uid,)).fetchone()
         if not exists:
             is_new = True
             db.execute("INSERT INTO users (user_id, username, role) VALUES (?, ?, ?)", (uid, uname, role))
-        
         if role == 'admin':
             db.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (uid,))
         db.commit()
@@ -221,7 +224,8 @@ def proj_name(message):
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'proj_type')
 def proj_type(message):
-    if message.text not in ["Карта", "Сим", "Проект", "Другое"]: return bot.send_message(message.chat.id, "Кнопкой!")
+    if message.text not in ["Карта", "Сим", "Проект", "Другое"]:
+        return bot.send_message(message.chat.id, "Используйте кнопки!")
     update_data(message.chat.id, 'type', message.text)
     bot.send_message(message.chat.id, "Лимит расходов (число, или 0):", reply_markup=types.ReplyKeyboardRemove())
     set_state(message.chat.id, 'proj_limit')
@@ -233,7 +237,8 @@ def proj_finish(message):
     
     data = user_states[message.chat.id]['data']
     with sqlite3.connect(DB_NAME) as db:
-        db.execute("INSERT INTO projects (name, type, limit_exp) VALUES (?, ?, ?)", (data['name'], data['type'], limit))
+        db.execute("INSERT INTO projects (name, type, limit_exp) VALUES (?, ?, ?)", 
+                   (data['name'], data['type'], limit))
         db.commit()
     bot.send_message(message.chat.id, f"✅ Проект **{data['name']}** создан!", parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
     clear_state(message.chat.id)
@@ -267,7 +272,6 @@ def rep_sel(call):
 def rep_turn(message):
     val = safe_float(message.text)
     if val is None: return bot.send_message(message.chat.id, "Введите число (можно с запятой)!")
-    
     update_data(message.chat.id, 'turnover', val)
     bot.send_message(message.chat.id, "📦 Расход на **Материалы** (если нет - 0):", parse_mode="Markdown")
     set_state(message.chat.id, 'rep_mat')
@@ -276,7 +280,6 @@ def rep_turn(message):
 def rep_mat(message):
     val = safe_float(message.text)
     if val is None: return bot.send_message(message.chat.id, "Введите число!")
-    
     update_data(message.chat.id, 'mat', val)
     bot.send_message(message.chat.id, "💳 Расход на **Комиссии**:", parse_mode="Markdown")
     set_state(message.chat.id, 'rep_com')
@@ -285,7 +288,6 @@ def rep_mat(message):
 def rep_com(message):
     val = safe_float(message.text)
     if val is None: return bot.send_message(message.chat.id, "Введите число!")
-    
     update_data(message.chat.id, 'com', val)
     bot.send_message(message.chat.id, "👥 **Проценты** другим людям:", parse_mode="Markdown")
     set_state(message.chat.id, 'rep_perc')
@@ -294,7 +296,6 @@ def rep_com(message):
 def rep_perc(message):
     val = safe_float(message.text)
     if val is None: return bot.send_message(message.chat.id, "Введите число!")
-    
     update_data(message.chat.id, 'perc', val)
     bot.send_message(message.chat.id, "🛠 **Дополнительные** расходы (или 0):", parse_mode="Markdown")
     set_state(message.chat.id, 'rep_extra')
@@ -330,7 +331,6 @@ def rep_finish(message):
         f"📈 **ROI:** *{roi:.1f}%*\n"
         f"📊 **Маржа:** *{margin:.1f}%*"
     )
-    
     bot.send_message(message.chat.id, res, parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
     clear_state(message.chat.id)
 
@@ -350,12 +350,10 @@ def admin_cmd(message):
 def adm_users(call):
     with sqlite3.connect(DB_NAME) as db:
         users = db.execute("SELECT user_id, username, role, join_date FROM users").fetchall()
-    
     text = f"👥 **Всего пользователей: {len(users)}**\n\n"
     for u in users:
         name = f"@{u[1]}" if u[1] else "Без ника"
         text += f"ID: `{u[0]}` | {name} | {u[2]}\n"
-    
     if len(text) > 4000: text = text[:4000] + "..."
     bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
     bot.answer_callback_query(call.id)
@@ -365,7 +363,6 @@ def adm_logs(call):
     bot.send_message(call.message.chat.id, "\n".join(global_logs[-15:]) or "Пусто")
     bot.answer_callback_query(call.id)
 
-# --- РАССЫЛКА ---
 @bot.callback_query_handler(func=lambda call: call.data == "adm_broadcast")
 def adm_broadcast_start(call):
     bot.send_message(call.message.chat.id, "📝 **Введите текст рассылки** (о новинках/обновлениях):")
@@ -376,10 +373,8 @@ def adm_broadcast_start(call):
 def adm_broadcast_send(message):
     text = message.text
     bot.send_message(message.chat.id, "⏳ Начинаю рассылку...")
-    
     with sqlite3.connect(DB_NAME) as db:
         users = db.execute("SELECT user_id FROM users").fetchall()
-    
     count = 0
     for user in users:
         try:
@@ -387,12 +382,11 @@ def adm_broadcast_send(message):
             count += 1
             time.sleep(0.1) 
         except: pass
-        
     bot.send_message(message.chat.id, f"✅ Рассылка завершена. Доставлено: {count} пользователям.", reply_markup=main_menu(message.chat.id))
     clear_state(message.chat.id)
 
 # ===========================
-# 4. КАЛЬКУЛЯТОРЫ (ТОЧНЫЙ ВВОД)
+# 4. КАЛЬКУЛЯТОРЫ
 # ===========================
 @bot.message_handler(func=lambda m: m.text == "🧮 Калькулятор")
 def calc_start(message):
@@ -431,15 +425,12 @@ def calc_5(message):
     if p1 and p2:
         u = convert(d['amt'], d['c1'], p1, True)
         f = convert(u*(1-fee/100), d['c2'], p2, False)
-        
         c_name = get_currency_name(d['c2'])
         bot.send_message(message.chat.id, f"✅ Итог: **{f:,.2f} {c_name}**", parse_mode="Markdown")
     else:
         bot.send_message(message.chat.id, "Ошибка курса.")
-        
     clear_state(message.chat.id)
 
-# ТРОЙНОЙ ОБМЕН
 @bot.message_handler(func=lambda m: m.text == "🔀 Тройной Обмен")
 def tr_start(message):
     clear_state(message.chat.id)
@@ -483,10 +474,8 @@ def tr_6(message):
         u1 = convert(d['amt'], d['t1'], p1, True)
         u2 = convert(convert(u1*(1-fee), d['t2'], p2, False), d['t2'], p2, True)
         fin = convert(u2*(1-fee), d['t3'], p3, False)
-        
         c_name = get_currency_name(d['t3'])
         bot.send_message(message.chat.id, f"✅ Итог: **{fin:,.2f} {c_name}**", parse_mode="Markdown")
-        
     clear_state(message.chat.id)
 
 # ГРАФИКИ
@@ -567,7 +556,6 @@ def ai_logic(message):
                     if message.text == "Что купить?" and val < 40: best, rsi = n, val; break
                     if message.text == "Что продать?" and val > 60: best, rsi = n, val; break
             except: continue
-        
         bot.send_message(message.chat.id, f"Совет: {best} (RSI: {rsi:.1f})")
     else:
         bot.send_message(message.chat.id, "Я понимаю кнопки.")
