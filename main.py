@@ -18,7 +18,7 @@ from datetime import datetime
 # --- КОНФИГУРАЦИЯ ---
 # Бот сначала ищет токен в настройках Railway. Если там пусто, берет этот жесткий токен:
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAFdctXociA1FcnaxKW7N0wbfc6SdFbJ1v0')
-MAIN_ADMIN = 'SIavyanln' 
+MAIN_ADMIN = 'Slavyanln' 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
