@@ -16,10 +16,11 @@ import os
 from datetime import datetime
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAEJ_P_Ttiy8-nrf1W2KfOqxQDiJNY1MlGk')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAFdctXociA1FcnaxKW7N0wbfc6SdFbJ1v0')
 
-# !!! ВСТАВЬ СЮДА СВОЙ ЦИФРОВОЙ ID !!! (от @userinfobot)
-MAIN_ADMIN_ID = 7031015199
+# !!! ВСТАВЬ СЮДА СВОЙ ЦИФРОВОЙ ID (Число) !!!
+# Узнать можно у бота @userinfobot
+MAIN_ADMIN_ID = 0 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -32,18 +33,21 @@ TICKERS = {
 }
 REVERSE_PAIRS = ['RUB=X', 'KGS=X', 'CNY=X', 'AED=X', 'TJS=X', 'UZS=X']
 
-# --- БАЗА ДАННЫХ И ПАМЯТЬ ---
+# --- БАЗА ДАННЫХ ---
 DB_NAME = "bot_data.db"
 user_states = {} 
 global_logs = []
 
 def init_db():
     with sqlite3.connect(DB_NAME) as db:
+        # Пользователи
         db.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            role TEXT DEFAULT 'executor'
+            role TEXT DEFAULT 'executor',
+            join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        # Проекты
         db.execute('''CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -51,7 +55,7 @@ def init_db():
             limit_exp REAL,
             active INTEGER DEFAULT 1
         )''')
-        # В reports храним итоговые цифры
+        # Отчеты
         db.execute('''CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -63,6 +67,7 @@ def init_db():
             margin REAL,
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        # Избранное
         db.execute('''CREATE TABLE IF NOT EXISTS watchlist (
             user_id INTEGER,
             ticker TEXT,
@@ -112,6 +117,26 @@ def convert(amount, ticker, price, to_usd=True):
         return amount / price if to_usd else amount * price
     return amount * price if to_usd else amount / price
 
+# --- ТЕКСТЫ ОБУЧЕНИЯ ---
+def send_tutorial(uid):
+    text = (
+        "👋 **Добро пожаловать! Я твой Финансовый Ассистент.**\n\n"
+        "Вот подробная инструкция, что я умею:\n\n"
+        "🧮 **Калькулятор**\n"
+        "Обычный обменник. Выбираешь валюту А -> валюту Б -> сумму -> комиссию биржи. Я посчитаю, сколько ты получишь на руки.\n\n"
+        "🔀 **Тройной Обмен (Арбитраж)**\n"
+        "Для связок. Например: `USDT` -> `RUB` -> `KGS`. Вводишь валюты и комиссии на каждом шаге, я считаю итоговый профит.\n\n"
+        "📈 **Графики**\n"
+        "Показываю историю цены любой валюты. Можно выбрать период (30 дней, 7 дней, 3 часа). Там же можно добавить валюту в **Избранное**.\n\n"
+        "⭐ **Мой список**\n"
+        "Быстрый просмотр курсов тех валют, которые ты добавил в Избранное.\n\n"
+        "➕ **Отчет (Проекты)**\n"
+        "Для работы. Выбираешь проект, вводишь Оборот, Расходы и Комиссии. Я считаю **Чистую прибыль**, **ROI** и **Маржу** и сохраняю отчет.\n\n"
+        "💬 **AI Советник**\n"
+        "Умный помощник. Спроси 'Что купить?', и я проанализирую рынок через индикатор RSI (перекупленность/перепроданность) и дам совет."
+    )
+    bot.send_message(uid, text, parse_mode="Markdown")
+
 # --- КЛАВИАТУРЫ ---
 def main_menu(uid):
     role = get_user_role(uid)
@@ -119,6 +144,7 @@ def main_menu(uid):
     markup.add("🧮 Калькулятор", "🔀 Тройной Обмен")
     markup.add("📈 Графики", "⭐ Мой список")
     markup.add("💬 AI Советник", "➕ Отчет (Проекты)")
+    markup.add("❓ Помощь / Инструкция")
     
     if role == 'admin': 
         markup.add("🆕 Создать Проект", "⚙️ Админ Консоль")
@@ -141,42 +167,54 @@ def start(message):
     uname = message.from_user.username
     role = 'admin' if uid == MAIN_ADMIN_ID else 'executor'
     
+    # Проверка: Новый юзер или нет?
+    is_new = False
     with sqlite3.connect(DB_NAME) as db:
-        db.execute("INSERT OR IGNORE INTO users (user_id, username, role) VALUES (?, ?, ?)", (uid, uname, role))
+        exists = db.execute("SELECT 1 FROM users WHERE user_id = ?", (uid,)).fetchone()
+        if not exists:
+            is_new = True
+            db.execute("INSERT INTO users (user_id, username, role) VALUES (?, ?, ?)", (uid, uname, role))
+        
+        # Обновляем роль, если это админ
         if role == 'admin':
             db.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (uid,))
         db.commit()
     
     log_action(uid, uname, "Start")
-    bot.send_message(uid, f"Привет! Твой ID: {uid}\nРоль: {role}", reply_markup=main_menu(uid))
+    
+    if is_new:
+        send_tutorial(uid) # ПОДРОБНОЕ ОБУЧЕНИЕ
+        time.sleep(2)
+        bot.send_message(uid, "Теперь ты готов к работе! 👇", reply_markup=main_menu(uid))
+    else:
+        bot.send_message(uid, f"С возвращением! Работаем.", reply_markup=main_menu(uid))
+
+@bot.message_handler(func=lambda m: m.text == "❓ Помощь / Инструкция")
+def help_btn(message):
+    send_tutorial(message.chat.id)
 
 # ===========================
-# 1. СОЗДАНИЕ ПРОЕКТОВ (ШАГИ)
+# 1. СОЗДАНИЕ ПРОЕКТОВ
 # ===========================
 @bot.message_handler(func=lambda m: m.text == "🆕 Создать Проект")
 def proj_start(message):
     if get_user_role(message.chat.id) != 'admin': return
-    
-    bot.send_message(message.chat.id, "Введите название проекта (например 'Карта 1'):", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, "Введите название проекта:", reply_markup=types.ReplyKeyboardRemove())
     set_state(message.chat.id, 'proj_name')
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'proj_name')
 def proj_name(message):
     update_data(message.chat.id, 'name', message.text)
-    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("Карта", "Сим", "Проект", "Другое")
-    
     bot.send_message(message.chat.id, "Выберите тип проекта:", reply_markup=markup)
     set_state(message.chat.id, 'proj_type')
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'proj_type')
 def proj_type(message):
-    if message.text not in ["Карта", "Сим", "Проект", "Другое"]:
-        return bot.send_message(message.chat.id, "Используйте кнопки!")
-        
+    if message.text not in ["Карта", "Сим", "Проект", "Другое"]: return bot.send_message(message.chat.id, "Кнопкой!")
     update_data(message.chat.id, 'type', message.text)
-    bot.send_message(message.chat.id, "Введите лимит расходов (число, или 0):", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, "Лимит расходов (число, или 0):", reply_markup=types.ReplyKeyboardRemove())
     set_state(message.chat.id, 'proj_limit')
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'proj_limit')
@@ -184,21 +222,15 @@ def proj_finish(message):
     try:
         limit = float(message.text)
         data = user_states[message.chat.id]['data']
-        
         with sqlite3.connect(DB_NAME) as db:
-            db.execute("INSERT INTO projects (name, type, limit_exp) VALUES (?, ?, ?)", 
-                       (data['name'], data['type'], limit))
+            db.execute("INSERT INTO projects (name, type, limit_exp) VALUES (?, ?, ?)", (data['name'], data['type'], limit))
             db.commit()
-            
-        bot.send_message(message.chat.id, f"✅ Проект **{data['name']}** ({data['type']}) создан!", 
-                         parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
+        bot.send_message(message.chat.id, f"✅ Проект **{data['name']}** создан!", parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
         clear_state(message.chat.id)
-        
-    except ValueError: 
-        bot.send_message(message.chat.id, "Ошибка! Введите число.")
+    except: bot.send_message(message.chat.id, "Ошибка. Введите число.")
 
 # ===========================
-# 2. ОТЧЕТЫ (ПОШАГОВЫЕ)
+# 2. ОТЧЕТЫ (ДЕТАЛЬНЫЕ)
 # ===========================
 @bot.message_handler(func=lambda m: m.text == "➕ Отчет (Проекты)")
 def rep_start(message):
@@ -209,23 +241,17 @@ def rep_start(message):
     if not projs: return bot.send_message(message.chat.id, "Нет активных проектов.")
     
     markup = types.InlineKeyboardMarkup()
-    for p in projs: 
-        markup.add(types.InlineKeyboardButton(f"{p[1]} ({p[2]})", callback_data=f"rep_p_{p[0]}"))
-    
-    bot.send_message(message.chat.id, "Выберите проект для отчета:", reply_markup=markup)
+    for p in projs: markup.add(types.InlineKeyboardButton(f"{p[1]} ({p[2]})", callback_data=f"rep_p_{p[0]}"))
+    bot.send_message(message.chat.id, "Выберите проект:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rep_p_'))
 def rep_sel(call):
     pid = int(call.data.split('_')[2])
-    # Сохраняем ID проекта и имя (для красоты)
     with sqlite3.connect(DB_NAME) as db:
         pname = db.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()[0]
-    
     set_state(call.message.chat.id, 'rep_turn', {'pid': pid, 'pname': pname})
-    bot.edit_message_text(f"Проект: {pname}\n\n💰 Введите **Оборот** (грязными):", 
-                          call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    bot.edit_message_text(f"Проект: {pname}\n\n💰 Введите **Оборот** (грязными):", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-# Шаг 1: Оборот
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'rep_turn')
 def rep_turn(message):
     try:
@@ -233,9 +259,8 @@ def rep_turn(message):
         update_data(message.chat.id, 'turnover', val)
         bot.send_message(message.chat.id, "📦 Расход на **Материалы** (если нет - 0):", parse_mode="Markdown")
         set_state(message.chat.id, 'rep_mat')
-    except: bot.send_message(message.chat.id, "Введите число!")
+    except: bot.send_message(message.chat.id, "Число!")
 
-# Шаг 2: Материал
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'rep_mat')
 def rep_mat(message):
     try:
@@ -243,9 +268,8 @@ def rep_mat(message):
         update_data(message.chat.id, 'mat', val)
         bot.send_message(message.chat.id, "💳 Расход на **Комиссии**:", parse_mode="Markdown")
         set_state(message.chat.id, 'rep_com')
-    except: bot.send_message(message.chat.id, "Введите число!")
+    except: bot.send_message(message.chat.id, "Число!")
 
-# Шаг 3: Комиссии
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'rep_com')
 def rep_com(message):
     try:
@@ -253,9 +277,8 @@ def rep_com(message):
         update_data(message.chat.id, 'com', val)
         bot.send_message(message.chat.id, "👥 **Проценты** другим людям:", parse_mode="Markdown")
         set_state(message.chat.id, 'rep_perc')
-    except: bot.send_message(message.chat.id, "Введите число!")
+    except: bot.send_message(message.chat.id, "Число!")
 
-# Шаг 4: Проценты
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'rep_perc')
 def rep_perc(message):
     try:
@@ -263,74 +286,94 @@ def rep_perc(message):
         update_data(message.chat.id, 'perc', val)
         bot.send_message(message.chat.id, "🛠 **Дополнительные** расходы (или 0):", parse_mode="Markdown")
         set_state(message.chat.id, 'rep_extra')
-    except: bot.send_message(message.chat.id, "Введите число!")
+    except: bot.send_message(message.chat.id, "Число!")
 
-# Шаг 5: Допы и Финал
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'rep_extra')
 def rep_finish(message):
     try:
         extra = float(message.text)
         d = user_states[message.chat.id]['data']
         
-        # Расчеты
         turnover = d['turnover']
         total_expenses = d['mat'] + d['com'] + d['perc'] + extra
         net_profit = turnover - total_expenses
-        
-        # Защита от деления на ноль
         roi = (net_profit / total_expenses * 100) if total_expenses > 0 else 0
         margin = (net_profit / turnover * 100) if turnover > 0 else 0
         
-        # Сохранение в БД
         with sqlite3.connect(DB_NAME) as db:
-            db.execute("""
-                INSERT INTO reports 
-                (user_id, project_id, turnover, expenses, profit, roi, margin) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (message.chat.id, d['pid'], turnover, total_expenses, net_profit, roi, margin))
+            db.execute("INSERT INTO reports (user_id, project_id, turnover, expenses, profit, roi, margin) VALUES (?,?,?,?,?,?,?)",
+                       (message.chat.id, d['pid'], turnover, total_expenses, net_profit, roi, margin))
             db.commit()
             
-        # Красивый вывод
-        res = (
-            f"✅ **Отчет принят!**\n\n"
-            f"📂 **Проект:** {d['pname']}\n"
-            f"💰 **Оборот:** {turnover:,.0f} ₽\n"
-            f"💸 **Общие расходы:** {total_expenses:,.0f} ₽\n"
-            f"💵 **Чистая прибыль:** {net_profit:,.0f} ₽\n"
-            f"📈 **ROI:** {roi:.1f}%\n"
-            f"📊 **Маржа:** {margin:.1f}%"
-        )
+        res = (f"✅ **Отчет принят!**\n\n📂 **Проект:** {d['pname']}\n💰 **Оборот:** {turnover:,.0f} ₽\n"
+               f"💸 **Расходы:** {total_expenses:,.0f} ₽\n💵 **Чистая прибыль:** {net_profit:,.0f} ₽\n"
+               f"📈 **ROI:** {roi:.1f}%\n📊 **Маржа:** {margin:.1f}%")
         
         bot.send_message(message.chat.id, res, parse_mode="Markdown", reply_markup=main_menu(message.chat.id))
         clear_state(message.chat.id)
-        
-    except ValueError: bot.send_message(message.chat.id, "Введите число!")
+    except: bot.send_message(message.chat.id, "Ошибка числа.")
 
 # ===========================
-# ОСТАЛЬНЫЕ ФУНКЦИИ (Сохранены)
+# 3. АДМИН ПАНЕЛЬ + РАССЫЛКА
 # ===========================
-
-# АДМИН ПАНЕЛЬ
 @bot.message_handler(func=lambda m: m.text == "⚙️ Админ Консоль")
 def admin_cmd(message):
     if message.chat.id != MAIN_ADMIN_ID: return
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("👥 Пользователи", callback_data="adm_users"))
-    markup.add(types.InlineKeyboardButton("📜 Логи", callback_data="adm_logs"))
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("👥 Пользователи", callback_data="adm_users"),
+               types.InlineKeyboardButton("📜 Логи", callback_data="adm_logs"))
+    markup.add(types.InlineKeyboardButton("📢 Рассылка (Update)", callback_data="adm_broadcast"))
     bot.send_message(message.chat.id, "🔒 Панель управления", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "adm_users")
 def adm_users(call):
+    # Исправленная функция: обрабатывает None в нике
     with sqlite3.connect(DB_NAME) as db:
-        users = db.execute("SELECT username, user_id, role FROM users").fetchall()
-    text = "\n".join([f"ID:{u[1]} @{u[0]} ({u[2]})" for u in users])
-    bot.send_message(call.message.chat.id, f"👥 **Список:**\n{text[:4000]}", parse_mode="Markdown")
+        users = db.execute("SELECT user_id, username, role, join_date FROM users").fetchall()
+    
+    text = f"👥 **Всего пользователей: {len(users)}**\n\n"
+    for u in users:
+        name = f"@{u[1]}" if u[1] else "Без ника"
+        text += f"ID: `{u[0]}` | {name} | {u[2]}\n"
+    
+    if len(text) > 4000: text = text[:4000] + "..."
+    bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "adm_logs")
 def adm_logs(call):
     bot.send_message(call.message.chat.id, "\n".join(global_logs[-15:]) or "Пусто")
+    bot.answer_callback_query(call.id)
 
-# КАЛЬКУЛЯТОР
+# --- РАССЫЛКА ---
+@bot.callback_query_handler(func=lambda call: call.data == "adm_broadcast")
+def adm_broadcast_start(call):
+    bot.send_message(call.message.chat.id, "📝 **Введите текст рассылки** (о новинках/обновлениях):")
+    set_state(call.message.chat.id, 'admin_broadcast')
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id, {}).get('step') == 'admin_broadcast')
+def adm_broadcast_send(message):
+    text = message.text
+    bot.send_message(message.chat.id, "⏳ Начинаю рассылку...")
+    
+    with sqlite3.connect(DB_NAME) as db:
+        users = db.execute("SELECT user_id FROM users").fetchall()
+    
+    count = 0
+    for user in users:
+        try:
+            bot.send_message(user[0], f"🔔 **ОБНОВЛЕНИЕ БОТА!**\n\n{text}", parse_mode="Markdown")
+            count += 1
+            time.sleep(0.1) # Чтобы не словить спам-бан
+        except: pass
+        
+    bot.send_message(message.chat.id, f"✅ Рассылка завершена. Доставлено: {count} пользователям.", reply_markup=main_menu(message.chat.id))
+    clear_state(message.chat.id)
+
+# ===========================
+# 4. КАЛЬКУЛЯТОРЫ И ГРАФИКИ
+# ===========================
 @bot.message_handler(func=lambda m: m.text == "🧮 Калькулятор")
 def calc_start(message):
     clear_state(message.chat.id)
