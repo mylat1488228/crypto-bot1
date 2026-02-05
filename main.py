@@ -16,11 +16,11 @@ import os
 from datetime import datetime
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAFdctXociA1FcnaxKW7N0wbfc6SdFbJ1v0')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8212929038:AAEJ_P_Ttiy8-nrf1W2KfOqxQDiJNY1MlGk')
 
 # !!! ВСТАВЬ СЮДА СВОЙ ЦИФРОВОЙ ID (Число) !!!
 # Узнать можно у бота @userinfobot
-MAIN_ADMIN_ID = 0 
+MAIN_ADMIN_ID = 7031015199
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
